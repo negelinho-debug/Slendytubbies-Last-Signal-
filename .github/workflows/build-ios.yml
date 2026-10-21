@@ -1,0 +1,134 @@
+
+name: Slendytubbies Last Signal iOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore game
+        run: |
+          cat Slendytubbies_Last_Signal_Project.part01 \
+              Slendytubbies_Last_Signal_Project.part02 > game.zip
+          mkdir game
+          unzip -q game.zip -d game
+          test -f game/project.godot
+          test -f game/assets/main_land.glb
+          test -f game/assets/outskirts.glb
+
+      - name: Install Godot 3.6.3
+        run: |
+          curl -fL --retry 3 -o godot.zip \
+            https://github.com/godotengine/godot-builds/releases/download/3.6.3-stable/Godot_v3.6.3-stable_osx.universal.zip
+          mkdir editor
+          unzip -q godot.zip -d editor
+          GODOT=$(find "$PWD/editor" \
+            -path '*/Contents/MacOS/Godot' \
+            -type f | head -1)
+          test -n "$GODOT"
+          chmod +x "$GODOT"
+          echo "GODOT=$GODOT" >> "$GITHUB_ENV"
+
+      - name: Install iOS templates
+        run: |
+          curl -fL --retry 3 -o templates.tpz \
+            https://github.com/godotengine/godot-builds/releases/download/3.6.3-stable/Godot_v3.6.3-stable_export_templates.tpz
+
+          DIR="$HOME/Library/Application Support/Godot/templates/3.6.3.stable"
+          mkdir -p "$DIR"
+
+          ENTRY=$(unzip -Z1 templates.tpz |
+            grep -E '(^|/)ios\.zip$' | head -1)
+
+          test -n "$ENTRY"
+          unzip -p templates.tpz "$ENTRY" > "$DIR/ios.zip"
+
+      - name: Configure iOS export
+        run: |
+          cat > game/export_presets.cfg <<'EOF'
+          [preset.0]
+
+          name="iOS"
+          platform="iOS"
+          runnable=true
+          custom_features=""
+          export_filter="all_resources"
+          include_filter=""
+          exclude_filter=""
+          export_path=""
+          patch_list=PoolStringArray()
+          script_export_mode=1
+
+          [preset.0.options]
+
+          architectures/arm64=true
+          application/app_store_team_id="ABCDE12345"
+          application/bundle_identifier="com.example.slendytubbieslastsignal"
+          application/code_sign_identity_debug="iPhone Developer"
+          application/code_sign_identity_release="iPhone Distribution"
+          application/export_method_release=0
+          application/short_version="0.2"
+          application/version="0.2"
+          custom_template/debug=""
+          custom_template/release=""
+          EOF
+
+      - name: Import models
+        run: |
+          mkdir -p logs
+          "$GODOT" --no-window --editor \
+            --path game --quit 2>&1 | tee logs/import.log
+
+      - name: Export iOS project
+        run: |
+          mkdir -p output
+          "$GODOT" --no-window \
+            --path game --export "iOS" \
+            "$GITHUB_WORKSPACE/output/LastSignal.zip" \
+            2>&1 | tee logs/export.log
+
+          test -s output/LastSignal.zip
+          mkdir ios
+          unzip -q output/LastSignal.zip -d ios
+
+      - name: Build unsigned IPA
+        run: |
+          PROJ=$(find ios -name '*.xcodeproj' \
+            -type d | head -1)
+          test -n "$PROJ"
+          SCHEME=$(basename "$PROJ" .xcodeproj)
+
+          xcodebuild \
+            -project "$PROJ" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$PWD/derived" \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee logs/build.log
+
+          APP=$(find derived/Build/Products \
+            -name '*.app' -type d | head -1)
+          test -n "$APP"
+
+          mkdir -p package/Payload
+          cp -R "$APP" package/Payload/
+          cd package
+          zip -qry ../Slendytubbies_Last_Signal.ipa Payload
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Slendytubbies-iOS
+          path: |
+            Slendytubbies_Last_Signal.ipa
+            logs/
+          if-no-files-found: warn
